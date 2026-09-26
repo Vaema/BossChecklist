@@ -14,507 +14,506 @@ using System.Text.RegularExpressions;
 using Terraria.ModLoader.Config;
 using BossChecklist.Systems;
 
-namespace BossChecklist
-{
-	internal enum EntryType {
-		Boss,
-		MiniBoss,
-		Event
+namespace BossChecklist;
+
+internal enum EntryType {
+	Boss,
+	MiniBoss,
+	Event
+}
+
+internal enum CollectibleType {
+	Relic,
+	MasterPet,
+	Trophy,
+	Mask,
+	Music,
+	Generic,
+}
+
+internal class EntryInfo {
+	// This localization-ignoring string is used for cross mod queries and networking. Each key is completely unique.
+	internal string Key { get; init; }
+
+	internal EntryType type;
+	internal string modSource;
+	internal LocalizedText name; // This should not be used for displaying purposes. Use 'EntryInfo.GetDisplayName' instead.
+	internal List<int> npcIDs;
+	internal Dictionary<int, LocalizedText> npcLimbs;
+	internal float progression;
+	internal Func<bool> downed;
+	internal Func<bool> available;
+	internal bool hidden;
+	internal Func<NPC, LocalizedText> customDespawnMessages;
+
+	internal List<string> relatedEntries;
+
+	internal List<int> spawnItem;
+	internal Func<LocalizedText> spawnInfo;
+	internal Dictionary<int, CollectibleType> collectibles;
+	internal List<DropRateInfo> loot;
+	internal List<int> lootItemTypes;
+	internal List<int> lootItemTypes_BagExclusives;
+
+	internal Asset<Texture2D> portraitTexture; // used for vanilla entry portrait drawing
+	internal Action<SpriteBatch, Rectangle, Color> customDrawing; // used for modded entry portrait drawing
+	internal Func<List<Asset<Texture2D>>> headIconTextures;
+
+	/*
+	internal ExpandoObject ConvertToExpandoObject() {
+		dynamic expando = new ExpandoObject();
+
+		expando.key = Key;
+		expando.modSource = modSource;
+		expando.internalName = internalName;
+		expando.displayName = name;
+
+		expando.progression = progression;
+		expando.downed = new Func<bool>(downed);
+
+		expando.isBoss = type.Equals(EntryType.Boss);
+		expando.isMiniboss = type.Equals(EntryType.MiniBoss);
+		expando.isEvent = type.Equals(EntryType.Event);
+
+		expando.npcIDs = new List<int>(npcIDs);
+		expando.spawnItem = new List<int>(spawnItem);
+		expando.loot = new List<int>(loot);
+		expando.collectibles = new List<int>(collectibles);
+
+		return expando;
+	}
+	*/
+
+	internal Dictionary<string, object> ConvertToDictionary(Version GetEntryInfoAPIVersion) {
+		// We may want to allow different returns based on api version.
+		//if (GetEntryInfoAPIVersion == new Version(1, 1)) {
+		var dict = new Dictionary<string, object> {
+			{ "key", Key },
+			{ "modSource", modSource },
+			{ "displayName", name },
+
+			{ "progression", progression },
+			{ "downed", new Func<bool>(downed) },
+
+			{ "isBoss", type.Equals(EntryType.Boss) },
+			{ "isMiniboss", type.Equals(EntryType.MiniBoss) },
+			{ "isEvent", type.Equals(EntryType.Event) },
+
+			{ "npcIDs", new List<int>(npcIDs) },
+			{ "spawnInfo", new Func<LocalizedText>(spawnInfo) },
+			{ "spawnItems", new List<int>(spawnItem) },
+			{ "treasureBag", TreasureBag },
+			{ "relic", Relic },
+			{ "dropRateInfo", new List<DropRateInfo>(loot) },
+			{ "loot", new List<int>(lootItemTypes) },
+			{ "collectibles", new List<int>(collectibles.Keys.ToList()) }
+		};
+
+		return dict;
 	}
 
-	internal enum CollectibleType {
-		Relic,
-		MasterPet,
-		Trophy,
-		Mask,
-		Music,
-		Generic,
+	internal string DisplayName => name.Value;
+
+	internal string DisplaySpawnInfo => spawnInfo().Value;
+	
+	internal string ModDisplayName => ModLoader.TryGetMod(modSource, out Mod mod) ? BossLogSystem.RemoveChatTags(mod) : modSource;
+
+	internal bool MarkedAsDowned => BossLogSystem.MarkedEntries.Contains(this.Key);
+
+	internal bool IsAutoDownedOrMarked => (BossChecklist.BossLogConfig.AutomaticChecklist && downed()) || MarkedAsDowned;
+
+	internal bool IsUpNext => BossLogUI.FindNextEntry() == GetIndex;
+
+	internal int GetIndex => BossChecklist.bossTracker.SortedEntries.IndexOf(this);
+
+	internal int TreasureBag => lootItemTypes.FirstOrDefault(itemId => ItemID.Sets.BossBag[itemId] && this.type != EntryType.Event); // skip events as bosses & minibosses are sometimes used within them
+
+	internal int Relic => collectibles.FirstOrDefault(x => x.Value == CollectibleType.Relic).Key;
+
+	internal int ExpertItem => lootItemTypes_BagExclusives.FirstOrDefault(x => ContentSamples.ItemsByType[x].expert);
+
+	internal List<int> CollectibleDrops => lootItemTypes.Intersect(collectibles.Keys).ToList();
+
+	internal bool IsRecordIndexed(out int recordIndex) {
+		recordIndex = BossChecklist.bossTracker.BossRecordKeys.IndexOf(this.Key);
+		return BossChecklist.bossTracker.BossRecordKeys.Contains(this.Key);
 	}
 
-	internal class EntryInfo {
-		// This localization-ignoring string is used for cross mod queries and networking. Each key is completely unique.
-		internal string Key { get; init; }
+	/// <summary>
+	/// Determines what despawn message should be used based on client configuration and submitted entry data.
+	/// </summary>
+	/// <returns>A LocalizedText of the despawn message of the passed npc. Returns null if no message can be found.</returns>
+	internal LocalizedText GetDespawnMessage(NPC npc) {
+		// When unique despawn messages are enabled, pass the NPC for the custom message function provided by the entry
+		if (BossChecklist.FeatureConfig.DespawnMessageType == FeatureConfiguration.MessageType.Unique && customDespawnMessages(npc) is LocalizedText message && Language.Exists(message.Key))
+			return message; // this will only return a unique message if the custom message function properly assigns one
 
-		internal EntryType type;
-		internal string modSource;
-		internal LocalizedText name; // This should not be used for displaying purposes. Use 'EntryInfo.GetDisplayName' instead.
-		internal List<int> npcIDs;
-		internal Dictionary<int, LocalizedText> npcLimbs;
-		internal float progression;
-		internal Func<bool> downed;
-		internal Func<bool> available;
-		internal bool hidden;
-		internal Func<NPC, LocalizedText> customDespawnMessages;
+		// If the Unique message was empty/null or the player is using Generic despawn messages, try to find an appropriate despawn message to send
+		// Return a generic despawn message if any player is left alive or return a boss victory despawn message if all player's were killed
+		if (BossChecklist.FeatureConfig.DespawnMessageType != FeatureConfiguration.MessageType.Disabled)
+			return BossChecklist.instance.GetLocalization(Main.player.Any(plr => plr.active && !plr.dead) ? "ChatMessages.Despawn.Generic" : "ChatMessages.Loss.Generic");
 
-		internal List<string> relatedEntries;
+		return null; // The despawn message feature was disabled. Return an empty message.
+	}
 
-		internal List<int> spawnItem;
-		internal Func<LocalizedText> spawnInfo;
-		internal Dictionary<int, CollectibleType> collectibles;
-		internal List<DropRateInfo> loot;
-		internal List<int> lootItemTypes;
-		internal List<int> lootItemTypes_BagExclusives;
+	/// <summary>
+	/// Handles the extra npc defeation messages related to boss limbs and towers.
+	/// These messages will not appear if the related configs are disabled.
+	/// </summary>
+	internal LocalizedText GetLimbMessage(NPC npc) {
+		if (BossChecklist.FeatureConfig.LimbMessages == FeatureConfiguration.MessageType.Unique && npcLimbs[npc.type] is LocalizedText message)
+			return message;
 
-		internal Asset<Texture2D> portraitTexture; // used for vanilla entry portrait drawing
-		internal Action<SpriteBatch, Rectangle, Color> customDrawing; // used for modded entry portrait drawing
-		internal Func<List<Asset<Texture2D>>> headIconTextures;
-
-		/*
-		internal ExpandoObject ConvertToExpandoObject() {
-			dynamic expando = new ExpandoObject();
-
-			expando.key = Key;
-			expando.modSource = modSource;
-			expando.internalName = internalName;
-			expando.displayName = name;
-
-			expando.progression = progression;
-			expando.downed = new Func<bool>(downed);
-
-			expando.isBoss = type.Equals(EntryType.Boss);
-			expando.isMiniboss = type.Equals(EntryType.MiniBoss);
-			expando.isEvent = type.Equals(EntryType.Event);
-
-			expando.npcIDs = new List<int>(npcIDs);
-			expando.spawnItem = new List<int>(spawnItem);
-			expando.loot = new List<int>(loot);
-			expando.collectibles = new List<int>(collectibles);
-
-			return expando;
-		}
-		*/
-
-		internal Dictionary<string, object> ConvertToDictionary(Version GetEntryInfoAPIVersion) {
-			// We may want to allow different returns based on api version.
-			//if (GetEntryInfoAPIVersion == new Version(1, 1)) {
-			var dict = new Dictionary<string, object> {
-				{ "key", Key },
-				{ "modSource", modSource },
-				{ "displayName", name },
-
-				{ "progression", progression },
-				{ "downed", new Func<bool>(downed) },
-
-				{ "isBoss", type.Equals(EntryType.Boss) },
-				{ "isMiniboss", type.Equals(EntryType.MiniBoss) },
-				{ "isEvent", type.Equals(EntryType.Event) },
-
-				{ "npcIDs", new List<int>(npcIDs) },
-				{ "spawnInfo", new Func<LocalizedText>(spawnInfo) },
-				{ "spawnItems", new List<int>(spawnItem) },
-				{ "treasureBag", TreasureBag },
-				{ "relic", Relic },
-				{ "dropRateInfo", new List<DropRateInfo>(loot) },
-				{ "loot", new List<int>(lootItemTypes) },
-				{ "collectibles", new List<int>(collectibles.Keys.ToList()) }
-			};
-
-			return dict;
+		if (BossChecklist.FeatureConfig.LimbMessages != FeatureConfiguration.MessageType.Disabled) {
+			string specialCase = (npc.type == NPCID.SkeletronHand || npc.type == NPCID.MoonLordHead) ? new NPCDefinition(npc.type).Name : "";
+			return BossChecklist.instance.GetLocalization($"ChatMessages.Defeated.Generic{specialCase}");
 		}
 
-		internal string DisplayName => name.Value;
+		return null;
+	}
 
-		internal string DisplaySpawnInfo => spawnInfo().Value;
+	/// <summary>
+	/// Determines whether or not the entry should be visible on the Table of Contents, 
+	/// based on configurations and filter status.
+	/// </summary>
+	/// <returns>If the entry should be visible</returns>
+	internal bool VisibleOnChecklist() {
+		if (BossChecklist.BossLogConfig.OnlyShowBossContent && type != EntryType.Boss)
+			return false; // if the user has the config to show strictly boss content and the entry is not a boss
+
+		if (BossLogSystem.Instance.BossLog.HiddenEntriesMode)
+			return true; // If the HiddenEntriesMode is currently active, all entries should be shown
+
+		bool HideUnsupported = modSource == "Unknown" && BossChecklist.BossLogConfig.HideUnsupported; // entries not using the new mod calls for the Boss Log
+		bool HideUnavailable = !available() && BossChecklist.BossLogConfig.HideUnavailable && !IsAutoDownedOrMarked; // entries that are labeled as not available
+		if (HideUnsupported || HideUnavailable || hidden)
+			return false;
+
+		// Make sure the filters allow the entry to be visible
+		BossLogConfiguration.FilterType bFilter = BossChecklist.BossLogConfig.FilterBosses;
+		BossLogConfiguration.FilterType mbFilter = BossChecklist.BossLogConfig.FilterMiniBosses;
+		BossLogConfiguration.FilterType eFilter = BossChecklist.BossLogConfig.FilterEvents;
+
+		bool FilterBoss = type == EntryType.Boss && bFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked;
+		bool FilterMiniBoss = type == EntryType.MiniBoss && (mbFilter == BossLogConfiguration.FilterType.Hide || (mbFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked));
+		bool FilterEvent = type == EntryType.Event && (eFilter == BossLogConfiguration.FilterType.Hide || (eFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked));
+		if (FilterBoss || FilterMiniBoss || FilterEvent)
+			return false;
+
+		return true; // if it passes all the checks, it should be shown
+	}
+
+	internal bool VisibleOnPageContent() {
+		if (BossChecklist.BossLogConfig.ProgressiveChecklist && !IsAutoDownedOrMarked && !IsUpNext)
+			return false;
+
+		return VisibleOnChecklist();
+	}
+
+	internal EntryInfo(EntryType entryType, string modSource, string internalName, out string KeyOutput, float progression, Func<bool> downed, List<int> npcIDs, Dictionary<string, object> extraData = null) {
+		// Add the mod source to the opted mods list of the credits page if its not already and add the entry type
+		if (modSource != "Terraria" && modSource != "Unknown") {
+			BossChecklist.bossTracker.RegisteredMods.TryAdd(modSource, new int[3]);
+			BossChecklist.bossTracker.RegisteredMods[modSource][(int)entryType]++;
+		}
+
+		// required entry data
+		this.Key = KeyOutput = modSource + " " + internalName;
+		this.type = entryType;
+		this.modSource = modSource;
+		this.progression = progression;
+		this.downed = downed ?? throw new ArgumentNullException(nameof(downed), BossChecklist.instance.GetLocalization("LogMessage.DownedIsNull").Format(this.Key));
+		this.npcIDs = npcIDs ?? [];
+
+		// Localization checks
+		LocalizedText name = extraData?.ContainsKey("displayName") == true ? extraData["displayName"] as LocalizedText : null;
+		Func<LocalizedText> spawnInfo = null;
+		if (extraData?.ContainsKey("spawnInfo") == true) {
+			if (extraData["spawnInfo"] is Func<LocalizedText>) {
+				spawnInfo = extraData["spawnInfo"] as Func<LocalizedText>;
+			}
+			else if (extraData["spawnInfo"] is LocalizedText) {
+				spawnInfo = () => extraData["spawnInfo"] as LocalizedText;
+			}
+		}
 		
-		internal string ModDisplayName => ModLoader.TryGetMod(modSource, out Mod mod) ? BossLogSystem.RemoveChatTags(mod) : modSource;
-
-		internal bool MarkedAsDowned => BossLogSystem.MarkedEntries.Contains(this.Key);
-
-		internal bool IsAutoDownedOrMarked => (BossChecklist.BossLogConfig.AutomaticChecklist && downed()) || MarkedAsDowned;
-
-		internal bool IsUpNext => BossLogUI.FindNextEntry() == GetIndex;
-
-		internal int GetIndex => BossChecklist.bossTracker.SortedEntries.IndexOf(this);
-
-		internal int TreasureBag => lootItemTypes.FirstOrDefault(itemId => ItemID.Sets.BossBag[itemId] && this.type != EntryType.Event); // skip events as bosses & minibosses are sometimes used within them
-
-		internal int Relic => collectibles.FirstOrDefault(x => x.Value == CollectibleType.Relic).Key;
-
-		internal int ExpertItem => lootItemTypes_BagExclusives.FirstOrDefault(x => ContentSamples.ItemsByType[x].expert);
-
-		internal List<int> CollectibleDrops => lootItemTypes.Intersect(collectibles.Keys).ToList();
-
-		internal bool IsRecordIndexed(out int recordIndex) {
-			recordIndex = BossChecklist.bossTracker.BossRecordKeys.IndexOf(this.Key);
-			return BossChecklist.bossTracker.BossRecordKeys.Contains(this.Key);
-		}
-
-		/// <summary>
-		/// Determines what despawn message should be used based on client configuration and submitted entry data.
-		/// </summary>
-		/// <returns>A LocalizedText of the despawn message of the passed npc. Returns null if no message can be found.</returns>
-		internal LocalizedText GetDespawnMessage(NPC npc) {
-			// When unique despawn messages are enabled, pass the NPC for the custom message function provided by the entry
-			if (BossChecklist.FeatureConfig.DespawnMessageType == FeatureConfiguration.MessageType.Unique && customDespawnMessages(npc) is LocalizedText message && Language.Exists(message.Key))
-				return message; // this will only return a unique message if the custom message function properly assigns one
-
-			// If the Unique message was empty/null or the player is using Generic despawn messages, try to find an appropriate despawn message to send
-			// Return a generic despawn message if any player is left alive or return a boss victory despawn message if all player's were killed
-			if (BossChecklist.FeatureConfig.DespawnMessageType != FeatureConfiguration.MessageType.Disabled)
-				return BossChecklist.instance.GetLocalization(Main.player.Any(plr => plr.active && !plr.dead) ? "ChatMessages.Despawn.Generic" : "ChatMessages.Loss.Generic");
-
-			return null; // The despawn message feature was disabled. Return an empty message.
-		}
-
-		/// <summary>
-		/// Handles the extra npc defeation messages related to boss limbs and towers.
-		/// These messages will not appear if the related configs are disabled.
-		/// </summary>
-		internal LocalizedText GetLimbMessage(NPC npc) {
-			if (BossChecklist.FeatureConfig.LimbMessages == FeatureConfiguration.MessageType.Unique && npcLimbs[npc.type] is LocalizedText message)
-				return message;
-
-			if (BossChecklist.FeatureConfig.LimbMessages != FeatureConfiguration.MessageType.Disabled) {
-				string specialCase = (npc.type == NPCID.SkeletronHand || npc.type == NPCID.MoonLordHead) ? new NPCDefinition(npc.type).Name : "";
-				return BossChecklist.instance.GetLocalization($"ChatMessages.Defeated.Generic{specialCase}");
+		if (name == null || spawnInfo == null) {
+			// Modded. Ensure that all nulls passed in autoregister a localization key.
+			if (type == EntryType.Event) {
+				name ??= Language.GetOrRegister($"Mods.{modSource}.BossChecklistIntegration.{internalName}.EntryName", () => Regex.Replace(internalName, "([A-Z])", " $1").Trim()); // Add spaces before each capital letter.
+				spawnInfo ??= () => Language.GetOrRegister($"Mods.{modSource}.BossChecklistIntegration.{internalName}.SpawnInfo", () => "Spawn conditions unknown");
 			}
-
-			return null;
-		}
-
-		/// <summary>
-		/// Determines whether or not the entry should be visible on the Table of Contents, 
-		/// based on configurations and filter status.
-		/// </summary>
-		/// <returns>If the entry should be visible</returns>
-		internal bool VisibleOnChecklist() {
-			if (BossChecklist.BossLogConfig.OnlyShowBossContent && type != EntryType.Boss)
-				return false; // if the user has the config to show strictly boss content and the entry is not a boss
-
-			if (BossLogSystem.Instance.BossLog.HiddenEntriesMode)
-				return true; // If the HiddenEntriesMode is currently active, all entries should be shown
-
-			bool HideUnsupported = modSource == "Unknown" && BossChecklist.BossLogConfig.HideUnsupported; // entries not using the new mod calls for the Boss Log
-			bool HideUnavailable = !available() && BossChecklist.BossLogConfig.HideUnavailable && !IsAutoDownedOrMarked; // entries that are labeled as not available
-			if (HideUnsupported || HideUnavailable || hidden)
-				return false;
-
-			// Make sure the filters allow the entry to be visible
-			BossLogConfiguration.FilterType bFilter = BossChecklist.BossLogConfig.FilterBosses;
-			BossLogConfiguration.FilterType mbFilter = BossChecklist.BossLogConfig.FilterMiniBosses;
-			BossLogConfiguration.FilterType eFilter = BossChecklist.BossLogConfig.FilterEvents;
-
-			bool FilterBoss = type == EntryType.Boss && bFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked;
-			bool FilterMiniBoss = type == EntryType.MiniBoss && (mbFilter == BossLogConfiguration.FilterType.Hide || (mbFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked));
-			bool FilterEvent = type == EntryType.Event && (eFilter == BossLogConfiguration.FilterType.Hide || (eFilter == BossLogConfiguration.FilterType.HideWhenCompleted && IsAutoDownedOrMarked));
-			if (FilterBoss || FilterMiniBoss || FilterEvent)
-				return false;
-
-			return true; // if it passes all the checks, it should be shown
-		}
-
-		internal bool VisibleOnPageContent() {
-			if (BossChecklist.BossLogConfig.ProgressiveChecklist && !IsAutoDownedOrMarked && !IsUpNext)
-				return false;
-
-			return VisibleOnChecklist();
-		}
-
-		internal EntryInfo(EntryType entryType, string modSource, string internalName, out string KeyOutput, float progression, Func<bool> downed, List<int> npcIDs, Dictionary<string, object> extraData = null) {
-			// Add the mod source to the opted mods list of the credits page if its not already and add the entry type
-			if (modSource != "Terraria" && modSource != "Unknown") {
-				BossChecklist.bossTracker.RegisteredMods.TryAdd(modSource, new int[3]);
-				BossChecklist.bossTracker.RegisteredMods[modSource][(int)entryType]++;
-			}
-
-			// required entry data
-			this.Key = KeyOutput = modSource + " " + internalName;
-			this.type = entryType;
-			this.modSource = modSource;
-			this.progression = progression;
-			this.downed = downed ?? throw new ArgumentNullException(nameof(downed), BossChecklist.instance.GetLocalization("LogMessage.DownedIsNull").Format(this.Key));
-			this.npcIDs = npcIDs ?? new List<int>();
-
-			// Localization checks
-			LocalizedText name = extraData?.ContainsKey("displayName") == true ? extraData["displayName"] as LocalizedText : null;
-			Func<LocalizedText> spawnInfo = null;
-			if (extraData?.ContainsKey("spawnInfo") == true) {
-				if (extraData["spawnInfo"] is Func<LocalizedText>) {
-					spawnInfo = extraData["spawnInfo"] as Func<LocalizedText>;
-				}
-				else if (extraData["spawnInfo"] is LocalizedText) {
-					spawnInfo = () => extraData["spawnInfo"] as LocalizedText;
-				}
-			}
-			
-			if (name == null || spawnInfo == null) {
-				// Modded. Ensure that all nulls passed in autoregister a localization key.
-				if (type == EntryType.Event) {
-					name ??= Language.GetOrRegister($"Mods.{modSource}.BossChecklistIntegration.{internalName}.EntryName", () => Regex.Replace(internalName, "([A-Z])", " $1").Trim()); // Add spaces before each capital letter.
-					spawnInfo ??= () => Language.GetOrRegister($"Mods.{modSource}.BossChecklistIntegration.{internalName}.SpawnInfo", () => "Spawn conditions unknown");
+			else {
+				int primaryNPCID = npcIDs?.Count > 0 ? npcIDs[0] : 0;
+				if (ModContent.GetModNPC(primaryNPCID) is ModNPC modNPC) {
+					string prefix = modNPC.GetLocalizationKey("BossChecklistIntegration");
+					// For single NPC bosses, assume EntryName is DisplayName rather than registering a localization key.
+					if (/*internalName == modNPC.Name &&*/ npcIDs.Count == 1 && !Language.Exists($"{prefix}.EntryName"))
+						name ??= modNPC.DisplayName;
+					name ??= Language.GetOrRegister($"{prefix}.EntryName", () => Regex.Replace(internalName, "([A-Z])", " $1").Trim());
+					spawnInfo ??= () => Language.GetOrRegister($"{prefix}.SpawnInfo", () => "Spawn conditions unknown"); // Register English/default, not localized.
 				}
 				else {
-					int primaryNPCID = npcIDs?.Count > 0 ? npcIDs[0] : 0;
-					if (ModContent.GetModNPC(primaryNPCID) is ModNPC modNPC) {
-						string prefix = modNPC.GetLocalizationKey("BossChecklistIntegration");
-						// For single NPC bosses, assume EntryName is DisplayName rather than registering a localization key.
-						if (/*internalName == modNPC.Name &&*/ npcIDs.Count == 1 && !Language.Exists($"{prefix}.EntryName"))
-							name ??= modNPC.DisplayName;
-						name ??= Language.GetOrRegister($"{prefix}.EntryName", () => Regex.Replace(internalName, "([A-Z])", " $1").Trim());
-						spawnInfo ??= () => Language.GetOrRegister($"{prefix}.SpawnInfo", () => "Spawn conditions unknown"); // Register English/default, not localized.
-					}
-					else {
-						// Mod registered boss for vanilla npc or no npcids?
-						name ??= BossChecklist.instance.GetLocalization("BossSpawnInfo.Unknown");
-						spawnInfo ??= () => BossChecklist.instance.GetLocalization("BossSpawnInfo.Unknown");
-					}
+					// Mod registered boss for vanilla npc or no npcids?
+					name ??= BossChecklist.instance.GetLocalization("BossSpawnInfo.Unknown");
+					spawnInfo ??= () => BossChecklist.instance.GetLocalization("BossSpawnInfo.Unknown");
 				}
 			}
+		}
 
-			this.name = name;
-			this.spawnInfo = spawnInfo;
+		this.name = name;
+		this.spawnInfo = spawnInfo;
 
-			// self-initializing data
-			this.hidden = false; // defaults to false, hidden status can be toggled per world
-			this.relatedEntries = new List<string>(); /// Setup in <see cref="BossTracker.SetupEntryRelations"/>
-			this.loot = new List<DropRateInfo>(); /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
-			this.lootItemTypes = new List<int>(); /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
-			this.lootItemTypes_BagExclusives = new List<int>(); /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
-			this.collectibles = new Dictionary<int, CollectibleType>(); /// Setup in <see cref="BossTracker.FinalizeCollectibleTypes"/>
-			if (extraData?.ContainsKey("collectibles") == true) {
-				if (extraData["collectibles"] is Dictionary<int, CollectibleType> collection) {
-					this.collectibles = collection;
-				}
-				else {
-					InterpretObjectAsListOfInt(extraData["collectibles"]).ForEach(item => collectibles.TryAdd(item, CollectibleType.Generic));
-				}
+		// self-initializing data
+		this.hidden = false; // defaults to false, hidden status can be toggled per world
+		this.relatedEntries = []; /// Setup in <see cref="BossTracker.SetupEntryRelations"/>
+		this.loot = []; /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
+		this.lootItemTypes = []; /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
+		this.lootItemTypes_BagExclusives = []; /// Setup in <see cref="BossTracker.FinalizeEntryLootTables"/>
+		this.collectibles = []; /// Setup in <see cref="BossTracker.FinalizeCollectibleTypes"/>
+		if (extraData?.ContainsKey("collectibles") == true) {
+			if (extraData["collectibles"] is Dictionary<int, CollectibleType> collection) {
+				this.collectibles = collection;
 			}
-
-			// optional extra data
-			List<int> InterpretObjectAsListOfInt(object data) => data is List<int> ? data as List<int> : (data is int ? new List<int>() { Convert.ToInt32(data) } : new List<int>());
-			List<string> InterpretObjectAsListOfStrings(object data) => data is List<string> ? data as List<string> : (data is string ? new List<string>() { data as string } : null);
-
-			this.npcLimbs = extraData?.ContainsKey("limbs") == true ? extraData["limbs"] as Dictionary<int, LocalizedText> : new Dictionary<int, LocalizedText>();
-			this.available = extraData?.ContainsKey("availability") == true ? extraData["availability"] as Func<bool> : () => true;
-			this.spawnItem = extraData?.ContainsKey("spawnItems") == true ? InterpretObjectAsListOfInt(extraData["spawnItems"]) : new List<int>();
-			this.customDrawing = extraData?.ContainsKey("customPortrait") == true ? extraData["customPortrait"] as Action<SpriteBatch, Rectangle, Color> : null;
-
-			this.customDespawnMessages = (NPC npc) => null;
-			if (extraData?.ContainsKey("despawnMessage") == true) {
-				if (extraData["despawnMessage"] is Func<NPC, LocalizedText> multiMessage) {
-					this.customDespawnMessages = multiMessage;
-				}
-				else if (extraData["despawnMessage"] is LocalizedText singleMessage) {
-					this.customDespawnMessages = (NPC npc) => singleMessage;
-				}
+			else {
+				InterpretObjectAsListOfInt(extraData["collectibles"]).ForEach(item => collectibles.TryAdd(item, CollectibleType.Generic));
 			}
+		}
 
-			headIconTextures = () => new List<Asset<Texture2D>> { TextureAssets.NpcHead[0] }; // If the head textures is empty, fill it with the '?' head icon so modder's see something is wrong
-			if (extraData?.ContainsKey("overrideHeadTextures") == true) {
-				object headIconData = extraData["overrideHeadTextures"];
-				if (headIconData is Func<List<string>>) {
-					headIconTextures = headIconData as Func<List<Asset<Texture2D>>>;
-				}
-				else if (InterpretObjectAsListOfStrings(headIconData) is List<string> pathList) {
-					List<Asset<Texture2D>> icons = new List<Asset<Texture2D>>();
-					foreach (string texturePath in pathList) {
-						if (ModContent.HasAsset(texturePath))
-							icons.Add(ModContent.Request<Texture2D>(texturePath, AssetRequestMode.ImmediateLoad));
-					}
+		// optional extra data
+		List<int> InterpretObjectAsListOfInt(object data) => data is List<int> ? data as List<int> : (data is int ? [Convert.ToInt32(data)] : []);
+		List<string> InterpretObjectAsListOfStrings(object data) => data is List<string> ? data as List<string> : (data is string ? new List<string>() { data as string } : null);
 
-					if (pathList.Count > 0)
-						headIconTextures = () => icons;
-				}
+		this.npcLimbs = extraData?.ContainsKey("limbs") == true ? extraData["limbs"] as Dictionary<int, LocalizedText> : [];
+		this.available = extraData?.ContainsKey("availability") == true ? extraData["availability"] as Func<bool> : () => true;
+		this.spawnItem = extraData?.ContainsKey("spawnItems") == true ? InterpretObjectAsListOfInt(extraData["spawnItems"]) : [];
+		this.customDrawing = extraData?.ContainsKey("customPortrait") == true ? extraData["customPortrait"] as Action<SpriteBatch, Rectangle, Color> : null;
+
+		this.customDespawnMessages = (NPC npc) => null;
+		if (extraData?.ContainsKey("despawnMessage") == true) {
+			if (extraData["despawnMessage"] is Func<NPC, LocalizedText> multiMessage) {
+				this.customDespawnMessages = multiMessage;
 			}
-			else if (entryType != EntryType.Event) {
-				// Skip events, as they must use a custom icon to display.
-				List<Asset<Texture2D>> icons = new List<Asset<Texture2D>>();
-				foreach (int npc in npcIDs) {
-					if (npc == NPCID.DD2DarkMageT1 || npc == NPCID.DD2OgreT2)
-						continue; // skips extra Ogre and Dark Mage head drawing
+			else if (extraData["despawnMessage"] is LocalizedText singleMessage) {
+				this.customDespawnMessages = (NPC npc) => singleMessage;
+			}
+		}
 
-					if (NPCID.Sets.BossHeadTextures[npc] != -1)
-						icons.Add(TextureAssets.NpcHeadBoss[NPCID.Sets.BossHeadTextures[npc]]);
+		headIconTextures = () => [TextureAssets.NpcHead[0]]; // If the head textures is empty, fill it with the '?' head icon so modder's see something is wrong
+		if (extraData?.ContainsKey("overrideHeadTextures") == true) {
+			object headIconData = extraData["overrideHeadTextures"];
+			if (headIconData is Func<List<string>>) {
+				headIconTextures = headIconData as Func<List<Asset<Texture2D>>>;
+			}
+			else if (InterpretObjectAsListOfStrings(headIconData) is List<string> pathList) {
+				List<Asset<Texture2D>> icons = [];
+				foreach (string texturePath in pathList) {
+					if (ModContent.HasAsset(texturePath))
+						icons.Add(ModContent.Request<Texture2D>(texturePath, AssetRequestMode.ImmediateLoad));
 				}
 
-				if (icons.Count > 0)
+				if (pathList.Count > 0)
 					headIconTextures = () => icons;
 			}
 		}
+		else if (entryType != EntryType.Event) {
+			// Skip events, as they must use a custom icon to display.
+			List<Asset<Texture2D>> icons = [];
+			foreach (int npc in npcIDs) {
+				if (npc == NPCID.DD2DarkMageT1 || npc == NPCID.DD2OgreT2)
+					continue; // skips extra Ogre and Dark Mage head drawing
 
-		// Workaround for vanilla events with illogical translation keys.
-		internal EntryInfo WithCustomTranslationKey(string translationKey) {
-			// EntryInfo.name should remain as a translation key.
-			this.name = Language.GetText(translationKey);
-			return this;
-		}
-
-		internal EntryInfo WithCustomLimbs(List<int> limbs) {
-			foreach (int npc in limbs) {
-				this.npcLimbs.TryAdd(npc, Language.GetOrRegister($"Mods.BossChecklist.ChatMessages.Defeated.{new NPCDefinition(npc).Name}")); // future-proofing for limb messages that may be added later
-			}
-			return this;
-		}
-
-		internal EntryInfo WithCustomAvailability(Func<bool> funcBool) {
-			this.available = funcBool;
-			return this;
-		}
-
-		internal EntryInfo WithCustomPortrait(string texturePath) {
-			if (ModContent.HasAsset(texturePath)) {
-				this.portraitTexture = ModContent.Request<Texture2D>(texturePath);
-			}
-			return this;
-		}
-
-		internal EntryInfo WithCustomHeadIcon(string texturePath) {
-			if (ModContent.HasAsset(texturePath)) {
-				this.headIconTextures = () => new List<Asset<Texture2D>>() { ModContent.Request<Texture2D>(texturePath) };
-			}
-			else {
-				this.headIconTextures = () => new List<Asset<Texture2D>>() { TextureAssets.NpcHead[0] };
-			}
-			return this;
-		}
-
-		internal EntryInfo WithCustomHeadIcon(List<string> texturePaths) {
-			List<Asset<Texture2D>> icons = new List<Asset<Texture2D>>();
-			foreach (string path in texturePaths) {
-				if (ModContent.HasAsset(path))
-					icons.Add(ModContent.Request<Texture2D>(path));
-			}
-			if (icons.Count == 0)
-				icons = new List<Asset<Texture2D>>() { TextureAssets.NpcHead[0] };
-
-			this.headIconTextures = () => icons;
-			return this;
-		}
-
-		internal static EntryInfo MakeVanillaBoss(EntryType type, float val, string key, int npcID, Func<bool> downed) {
-			string nameKey = key.Substring(key.LastIndexOf(".") + 1);
-
-			// BossChecklist only has despawn messages for vanilla Bosses
-			// Betsy does not have a despawn message as Old Ones Army has a message already
-			Func<NPC, LocalizedText> customMessages = null;
-			if (type == EntryType.Boss && nameKey != "DD2Betsy") {
-				List<int> DayDespawners = new List<int>() {
-					NPCID.EyeofCthulhu,
-					NPCID.Retinazer,
-					NPCID.Spazmatism,
-					NPCID.TheDestroyer,
-				};
-
-				customMessages = delegate (NPC npc) {
-					if (Main.player.All(plr => !plr.active || plr.dead)) {
-						return BossChecklist.instance.GetLocalization($"ChatMessages.Loss.{nameKey}"); // Despawn message when all players are dead
-					}
-					else if (Main.dayTime && DayDespawners.Contains(npc.type)) {
-						return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Day"); // Despawn message when it turns to day
-					}
-
-					// unique despawn messages should default to the generic message when no conditions are met
-					return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Generic");
-				};
+				if (NPCID.Sets.BossHeadTextures[npc] != -1)
+					icons.Add(TextureAssets.NpcHeadBoss[NPCID.Sets.BossHeadTextures[npc]]);
 			}
 
-			return new EntryInfo(
-				entryType: type,
-				modSource: "Terraria",
-				internalName: nameKey,
-				out string generatedKey,
-				progression: val,
-				downed: downed,
-				npcIDs: new List<int>() { npcID },
-				extraData: new Dictionary<string, object>() {
-					{ "displayName", Language.GetText(key) },
-					{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
-					{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
-					{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
-					{ "despawnMessage", customMessages },
-				}
-			);
+			if (icons.Count > 0)
+				headIconTextures = () => icons;
 		}
-
-		internal static EntryInfo MakeVanillaBoss(EntryType type, float val, string key, List<int> ids, Func<bool> downed) {
-			string nameKey = key.Substring(key.LastIndexOf(".") + 1).Replace(" ", "").Replace("'", "");
-			if (nameKey.EndsWith("Head"))
-				nameKey = nameKey.Substring(0, nameKey.Length - 4);
-
-			Func<NPC, LocalizedText> customMessages = null;
-			if (type == EntryType.Boss) { // BossChecklist only has despawn messages for vanilla Bosses
-				List<int> DayDespawners = new List<int>() {
-					NPCID.EyeofCthulhu,
-					NPCID.Retinazer,
-					NPCID.Spazmatism,
-					NPCID.TheDestroyer,
-				};
-
-				customMessages = delegate (NPC npc) {
-					if (Main.player.All(plr => !plr.active || plr.dead)) {
-						return BossChecklist.instance.GetLocalization($"ChatMessages.Loss.{nameKey}"); // Despawn message when all players are dead
-					}
-					else if (Main.dayTime && DayDespawners.Contains(npc.type)) {
-						return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Day"); // Despawn message when it turns to day
-					}
-
-					// unique despawn messages should default to the generic message when no conditions are met
-					return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Generic");
-				};
-			}
-
-			return new EntryInfo(
-				entryType: type,
-				modSource: "Terraria",
-				internalName: nameKey,
-				out string generatedKey,
-				progression: val,
-				downed: downed,
-				npcIDs: ids,
-				extraData: new Dictionary<string, object>() {
-					{ "displayName", Language.GetText(key) },
-					{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
-					{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
-					{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
-					{ "despawnMessage", customMessages },
-				}
-			);
-		}
-
-		internal static EntryInfo MakeVanillaEvent(float val, string key, Func<bool> downed) {
-			string nameKey = key.Substring(key.LastIndexOf(".") + 1).Replace(" ", "").Replace("'", "");
-			return new EntryInfo(
-				entryType: EntryType.Event,
-				modSource: "Terraria",
-				internalName: nameKey,
-				out string generatedKey,
-				progression: val,
-				downed: downed,
-				npcIDs: BossTracker.EventNPCs.GetValueOrDefault($"Terraria {nameKey}"),
-				extraData: new Dictionary<string, object>() {
-					{ "displayName", Language.GetText(key) },
-					{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
-					{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
-					{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
-				}
-			);
-		}
-
-		public override string ToString() => $"{progression} {Key}";
 	}
 
-	internal enum OrphanType {
-		SubmitEntryLoot,
-		SubmitEntryCollectibles,
-		SubmitEntrySpawnItems,
-		SubmitEventNPCs
+	// Workaround for vanilla events with illogical translation keys.
+	internal EntryInfo WithCustomTranslationKey(string translationKey) {
+		// EntryInfo.name should remain as a translation key.
+		this.name = Language.GetText(translationKey);
+		return this;
 	}
 
-	internal class OrphanInfo {
-		internal OrphanType type;
-		internal string modCallerDisplayName;
-		internal Dictionary<string, object> values;
-
-		internal OrphanInfo(OrphanType type, string modSource, Dictionary<string, object> values) {
-			this.type = type; // Type is null checked before being created within ModCall
-			this.modCallerDisplayName = modSource;
-
-			// Sort through the data submissions to remove any invalid data
-			foreach (string Key in values.Keys) {
-				if (!Key.StartsWith("Terraria ") && !ModLoader.TryGetMod(Key.Substring(0, Key.IndexOf(" ")), out _))
-					values.Remove(Key); // remove submissions that use an entry key from an unloaded mod (no need to log removed entries for unloaded mods)
-			}
-			this.values = values;
+	internal EntryInfo WithCustomLimbs(List<int> limbs) {
+		foreach (int npc in limbs) {
+			this.npcLimbs.TryAdd(npc, Language.GetOrRegister($"Mods.BossChecklist.ChatMessages.Defeated.{new NPCDefinition(npc).Name}")); // future-proofing for limb messages that may be added later
 		}
+		return this;
+	}
+
+	internal EntryInfo WithCustomAvailability(Func<bool> funcBool) {
+		this.available = funcBool;
+		return this;
+	}
+
+	internal EntryInfo WithCustomPortrait(string texturePath) {
+		if (ModContent.HasAsset(texturePath)) {
+			this.portraitTexture = ModContent.Request<Texture2D>(texturePath);
+		}
+		return this;
+	}
+
+	internal EntryInfo WithCustomHeadIcon(string texturePath) {
+		if (ModContent.HasAsset(texturePath)) {
+			this.headIconTextures = () => [ModContent.Request<Texture2D>(texturePath)];
+		}
+		else {
+			this.headIconTextures = () => [TextureAssets.NpcHead[0]];
+		}
+		return this;
+	}
+
+	internal EntryInfo WithCustomHeadIcon(List<string> texturePaths) {
+		List<Asset<Texture2D>> icons = [];
+		foreach (string path in texturePaths) {
+			if (ModContent.HasAsset(path))
+				icons.Add(ModContent.Request<Texture2D>(path));
+		}
+		if (icons.Count == 0)
+			icons = [TextureAssets.NpcHead[0]];
+
+		this.headIconTextures = () => icons;
+		return this;
+	}
+
+	internal static EntryInfo MakeVanillaBoss(EntryType type, float val, string key, int npcID, Func<bool> downed) {
+		string nameKey = key.Substring(key.LastIndexOf(".") + 1);
+
+		// BossChecklist only has despawn messages for vanilla Bosses
+		// Betsy does not have a despawn message as Old Ones Army has a message already
+		Func<NPC, LocalizedText> customMessages = null;
+		if (type == EntryType.Boss && nameKey != "DD2Betsy") {
+			List<int> DayDespawners = [
+				NPCID.EyeofCthulhu,
+				NPCID.Retinazer,
+				NPCID.Spazmatism,
+				NPCID.TheDestroyer,
+			];
+
+			customMessages = delegate (NPC npc) {
+				if (Main.player.All(plr => !plr.active || plr.dead)) {
+					return BossChecklist.instance.GetLocalization($"ChatMessages.Loss.{nameKey}"); // Despawn message when all players are dead
+				}
+				else if (Main.dayTime && DayDespawners.Contains(npc.type)) {
+					return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Day"); // Despawn message when it turns to day
+				}
+
+				// unique despawn messages should default to the generic message when no conditions are met
+				return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Generic");
+			};
+		}
+
+		return new EntryInfo(
+			entryType: type,
+			modSource: "Terraria",
+			internalName: nameKey,
+			out string generatedKey,
+			progression: val,
+			downed: downed,
+			npcIDs: [npcID],
+			extraData: new Dictionary<string, object>() {
+				{ "displayName", Language.GetText(key) },
+				{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
+				{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
+				{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
+				{ "despawnMessage", customMessages },
+			}
+		);
+	}
+
+	internal static EntryInfo MakeVanillaBoss(EntryType type, float val, string key, List<int> ids, Func<bool> downed) {
+		string nameKey = key.Substring(key.LastIndexOf(".") + 1).Replace(" ", "").Replace("'", "");
+		if (nameKey.EndsWith("Head"))
+			nameKey = nameKey.Substring(0, nameKey.Length - 4);
+
+		Func<NPC, LocalizedText> customMessages = null;
+		if (type == EntryType.Boss) { // BossChecklist only has despawn messages for vanilla Bosses
+			List<int> DayDespawners = [
+				NPCID.EyeofCthulhu,
+				NPCID.Retinazer,
+				NPCID.Spazmatism,
+				NPCID.TheDestroyer,
+			];
+
+			customMessages = delegate (NPC npc) {
+				if (Main.player.All(plr => !plr.active || plr.dead)) {
+					return BossChecklist.instance.GetLocalization($"ChatMessages.Loss.{nameKey}"); // Despawn message when all players are dead
+				}
+				else if (Main.dayTime && DayDespawners.Contains(npc.type)) {
+					return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Day"); // Despawn message when it turns to day
+				}
+
+				// unique despawn messages should default to the generic message when no conditions are met
+				return BossChecklist.instance.GetLocalization("ChatMessages.Despawn.Generic");
+			};
+		}
+
+		return new EntryInfo(
+			entryType: type,
+			modSource: "Terraria",
+			internalName: nameKey,
+			out string generatedKey,
+			progression: val,
+			downed: downed,
+			npcIDs: ids,
+			extraData: new Dictionary<string, object>() {
+				{ "displayName", Language.GetText(key) },
+				{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
+				{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
+				{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
+				{ "despawnMessage", customMessages },
+			}
+		);
+	}
+
+	internal static EntryInfo MakeVanillaEvent(float val, string key, Func<bool> downed) {
+		string nameKey = key.Substring(key.LastIndexOf(".") + 1).Replace(" ", "").Replace("'", "");
+		return new EntryInfo(
+			entryType: EntryType.Event,
+			modSource: "Terraria",
+			internalName: nameKey,
+			out string generatedKey,
+			progression: val,
+			downed: downed,
+			npcIDs: BossTracker.EventNPCs.GetValueOrDefault($"Terraria {nameKey}"),
+			extraData: new Dictionary<string, object>() {
+				{ "displayName", Language.GetText(key) },
+				{ "spawnInfo", BossChecklist.instance.GetLocalization($"BossSpawnInfo.{nameKey}") },
+				{ "spawnItems", BossTracker.EntrySpawnItems.GetValueOrDefault($"Terraria {nameKey}") },
+				{ "collectibles", BossTracker.EntryCollectibles.GetValueOrDefault($"Terraria {nameKey}") },
+			}
+		);
+	}
+
+	public override string ToString() => $"{progression} {Key}";
+}
+
+internal enum OrphanType {
+	SubmitEntryLoot,
+	SubmitEntryCollectibles,
+	SubmitEntrySpawnItems,
+	SubmitEventNPCs
+}
+
+internal class OrphanInfo {
+	internal OrphanType type;
+	internal string modCallerDisplayName;
+	internal Dictionary<string, object> values;
+
+	internal OrphanInfo(OrphanType type, string modSource, Dictionary<string, object> values) {
+		this.type = type; // Type is null checked before being created within ModCall
+		this.modCallerDisplayName = modSource;
+
+		// Sort through the data submissions to remove any invalid data
+		foreach (string Key in values.Keys) {
+			if (!Key.StartsWith("Terraria ") && !ModLoader.TryGetMod(Key.Substring(0, Key.IndexOf(" ")), out _))
+				values.Remove(Key); // remove submissions that use an entry key from an unloaded mod (no need to log removed entries for unloaded mods)
+		}
+		this.values = values;
 	}
 }
